@@ -2,6 +2,7 @@ import os, time, json, threading, hashlib
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file
 from gtts import gTTS
+from pydub import AudioSegment   # <-- biblioteca para converter MP3 → WAV
 import requests
 
 app = Flask(__name__)
@@ -21,7 +22,7 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "6"))
 # Helpers
 def frase_pix(nome, valor): return f"PIX recebido de {nome}, valor {valor}."
 def make_id(nome, valor): return hashlib.sha1(f"{nome}|{valor}".encode()).hexdigest()[:8]
-def mp3_path(audio_id): return os.path.join(AUDIO_DIR, f"{audio_id}.mp3")
+def wav_path(audio_id): return os.path.join(AUDIO_DIR, f"{audio_id}.wav")
 
 def load_processed():
     global processed_ids
@@ -36,11 +37,16 @@ def save_processed():
 
 def gerar_audio(nome, valor):
     audio_id = make_id(nome, valor)
-    path = mp3_path(audio_id)
+    path = wav_path(audio_id)
     if not os.path.exists(path):
         frase = frase_pix(nome, valor)
-        gTTS(frase, lang="pt").save(path)
-    return audio_id, f"/audio/{audio_id}.mp3"
+        # gTTS gera MP3 → convertemos para WAV
+        temp_mp3 = os.path.join(AUDIO_DIR, f"{audio_id}.mp3")
+        gTTS(frase, lang="pt").save(temp_mp3)
+        sound = AudioSegment.from_mp3(temp_mp3)
+        sound.export(path, format="wav")
+        os.remove(temp_mp3)  # limpa o MP3 temporário
+    return audio_id, f"/audio/{audio_id}.wav"
 
 def notificar_esp(audio_url, payment_id):
     url = f"{ESP_BASE}{ESP_PLAY_PATH}"
@@ -64,11 +70,11 @@ def tts():
     audio_id, audio_url = gerar_audio(nome, valor)
     return jsonify({"audio_id": audio_id, "audio_url": audio_url})
 
-@app.route("/audio/<audio_id>.mp3")
+@app.route("/audio/<audio_id>.wav")
 def audio(audio_id):
-    path = mp3_path(audio_id)
+    path = wav_path(audio_id)
     if not os.path.exists(path): return jsonify({"error":"não encontrado"}), 404
-    return send_file(path, mimetype="audio/mpeg")
+    return send_file(path, mimetype="audio/wav")
 
 @app.route("/health")
 def health(): return jsonify({"status":"ok"})

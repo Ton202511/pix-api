@@ -1,14 +1,23 @@
 import os, time, json, threading, hashlib
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, send_file
+from datetime import datetime
+from flask import Flask, request, jsonify, send_from_directory
 from gtts import gTTS
-from pydub import AudioSegment   # <-- biblioteca para converter MP3 → WAV
+from pydub import AudioSegment
 import requests
 
 app = Flask(__name__)
-AUDIO_DIR = "audios"; os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# Diretório de áudios
+AUDIO_DIR = "audios"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# Logs iniciais para confirmar diretórios
+app.logger.info(f"Diretório atual: {os.getcwd()}")
+app.logger.info(f"Pasta de áudios: {os.path.abspath(AUDIO_DIR)}")
+
 PROCESSED_STORE = "processed_ids.json"
-processed_ids = set(); processed_lock = threading.Lock()
+processed_ids = set()
+processed_lock = threading.Lock()
 
 # ENV config
 MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
@@ -20,9 +29,14 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "6"))
 
 # Helpers
-def frase_pix(nome, valor): return f"PIX recebido de {nome}, valor {valor}."
-def make_id(nome, valor): return hashlib.sha1(f"{nome}|{valor}".encode()).hexdigest()[:8]
-def wav_path(audio_id): return os.path.join(AUDIO_DIR, f"{audio_id}.wav")
+def frase_pix(nome, valor):
+    return f"PIX recebido de {nome}, valor {valor}."
+
+def make_id(nome, valor):
+    return hashlib.sha1(f"{nome}|{valor}".encode()).hexdigest()[:8]
+
+def wav_path(audio_id):
+    return os.path.join(AUDIO_DIR, f"{audio_id}.wav")
 
 def load_processed():
     global processed_ids
@@ -38,14 +52,15 @@ def save_processed():
 def gerar_audio(nome, valor):
     audio_id = make_id(nome, valor)
     path = wav_path(audio_id)
+    app.logger.info(f"Tentando salvar WAV em: {path}")
     if not os.path.exists(path):
         frase = frase_pix(nome, valor)
-        # gTTS gera MP3 → convertemos para WAV
         temp_mp3 = os.path.join(AUDIO_DIR, f"{audio_id}.mp3")
         gTTS(frase, lang="pt").save(temp_mp3)
         sound = AudioSegment.from_mp3(temp_mp3)
         sound.export(path, format="wav")
-        os.remove(temp_mp3)  # limpa o MP3 temporário
+        os.remove(temp_mp3)
+        app.logger.info(f"WAV criado: {path}")
     return audio_id, f"/audio/{audio_id}.wav"
 
 def notificar_esp(audio_url, payment_id):
@@ -66,22 +81,33 @@ def notificar_esp(audio_url, payment_id):
 def tts():
     d = request.get_json(force=True)
     nome, valor = d.get("nome","").strip(), d.get("valor_texto","").strip()
-    if not nome or not valor: return jsonify({"error":"faltam campos"}), 400
+    if not nome or not valor:
+        return jsonify({"error":"faltam campos"}), 400
     audio_id, audio_url = gerar_audio(nome, valor)
     return jsonify({"audio_id": audio_id, "audio_url": audio_url})
 
 @app.route("/audio/<audio_id>.wav")
 def audio(audio_id):
-    path = wav_path(audio_id)
-    if not os.path.exists(path): return jsonify({"error":"não encontrado"}), 404
-    return send_file(path, mimetype="audio/wav")
+    # Usa send_from_directory para servir corretamente
+    return send_from_directory(AUDIO_DIR, f"{audio_id}.wav", mimetype="audio/wav")
+
+@app.route("/debug/audios")
+def debug_audios():
+    abs_dir = os.path.abspath(AUDIO_DIR)
+    try:
+        files = sorted(os.listdir(AUDIO_DIR))
+    except Exception as e:
+        return jsonify({"dir_abs": abs_dir, "error": str(e)}), 500
+    return jsonify({"dir_abs": abs_dir, "files": files})
 
 @app.route("/health")
-def health(): return jsonify({"status":"ok"})
+def health():
+    return jsonify({"status":"ok"})
 
 # Mercado Pago monitor
 def buscar_pagamentos_once():
-    if not MP_ACCESS_TOKEN: return
+    if not MP_ACCESS_TOKEN:
+        return
     headers = {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
     try:
         r = requests.get(MP_SEARCH_URL, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -93,19 +119,23 @@ def buscar_pagamentos_once():
 
     for p in body.get("results", []):
         pid = str(p.get("id"))
-        if not pid or pid in processed_ids: continue
+        if not pid or pid in processed_ids:
+            continue
         if p.get("status") == "approved" and p.get("payment_method_id") == "pix":
             nome = p.get("payer", {}).get("first_name", "Cliente")
             valor = str(p.get("transaction_amount", ""))
             audio_id, audio_url = gerar_audio(nome, valor)
-            processed_ids.add(pid); save_processed()
+            processed_ids.add(pid)
+            save_processed()
             ok = notificar_esp(audio_url, pid)
             app.logger.info(f"Pix {pid} | Áudio: {audio_url} | ESP OK: {ok}")
 
 def monitor_loop():
     while True:
-        try: buscar_pagamentos_once()
-        except Exception as e: app.logger.warning(f"Erro monitor: {e}")
+        try:
+            buscar_pagamentos_once()
+        except Exception as e:
+            app.logger.warning(f"Erro monitor: {e}")
         time.sleep(CHECK_INTERVAL)
 
 # Start

@@ -14,5 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar o restante do código
 COPY . .
 
+# Definir variável de ambiente PORT dentro do container
+ENV PORT=10000
+
 # Comando para iniciar o servidor Flask com Gunicorn
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:${PORT}"]
+CMD gunicorn app:app --bind 0.0.0.0:$PORT

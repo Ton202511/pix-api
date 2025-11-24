@@ -1,8 +1,14 @@
 services:
   - type: web
-    name: pix-tts-backend
+    name: pix-tts-proxy
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app -b 0.0.0.0:10000
-
+    envVars:
+      - key: TTS_BASE
+        value: https://pix-tts-wav.onrender.com
+      - key: PROXY_AUTH_TOKEN
+        value: troque_por_um_token_forte
+      - key: REQUEST_TIMEOUT
+        value: 8

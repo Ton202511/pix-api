@@ -1,19 +1,14 @@
 import os, time, json, threading, hashlib
-from datetime import datetime
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from gtts import gTTS
 from pydub import AudioSegment
 import requests
 
 app = Flask(__name__)
 
-# Diretório de áudios
+# Diretório de áudios locais
 AUDIO_DIR = "audios"
 os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# Logs iniciais para confirmar diretórios
-app.logger.info(f"Diretório atual: {os.getcwd()}")
-app.logger.info(f"Pasta de áudios: {os.path.abspath(AUDIO_DIR)}")
 
 PROCESSED_STORE = "processed_ids.json"
 processed_ids = set()
@@ -27,6 +22,10 @@ ESP_AUTH_TOKEN = os.getenv("ESP_AUTH_TOKEN", "")
 ESP_PLAY_PATH = os.getenv("ESP_PLAY_PATH", "/play")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "6"))
+
+# Proxy config
+TTS_BASE = os.getenv("TTS_BASE", "https://pix-tts-wav.onrender.com")
+PROXY_AUTH_TOKEN = os.getenv("PROXY_AUTH_TOKEN", "")
 
 # Helpers
 def frase_pix(nome, valor):
@@ -52,7 +51,6 @@ def save_processed():
 def gerar_audio(nome, valor):
     audio_id = make_id(nome, valor)
     path = wav_path(audio_id)
-    app.logger.info(f"Tentando salvar WAV em: {path}")
     if not os.path.exists(path):
         frase = frase_pix(nome, valor)
         temp_mp3 = os.path.join(AUDIO_DIR, f"{audio_id}.mp3")
@@ -76,9 +74,17 @@ def notificar_esp(audio_url, payment_id):
         app.logger.warning(f"Erro ao notificar ESP: {e}")
         return False
 
+def auth_ok(req):
+    if not PROXY_AUTH_TOKEN:
+        return True
+    auth = req.headers.get("Authorization", "")
+    return auth == f"Bearer {PROXY_AUTH_TOKEN}"
+
 # Endpoints
 @app.route("/tts", methods=["POST"])
 def tts():
+    if not auth_ok(request):
+        return jsonify({"error":"unauthorized"}), 401
     d = request.get_json(force=True)
     nome, valor = d.get("nome","").strip(), d.get("valor_texto","").strip()
     if not nome or not valor:
@@ -88,8 +94,26 @@ def tts():
 
 @app.route("/audio/<audio_id>.wav")
 def audio(audio_id):
-    # Usa send_from_directory para servir corretamente
-    return send_from_directory(AUDIO_DIR, f"{audio_id}.wav", mimetype="audio/wav")
+    if not auth_ok(request):
+        return jsonify({"error":"unauthorized"}), 401
+    # Proxy para o backend original
+    src = f"{TTS_BASE}/audio/{audio_id}.wav"
+    try:
+        r = requests.get(src, stream=True, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+    except Exception as e:
+        app.logger.warning(f"Erro proxy WAV: {e}")
+        # fallback: servir local se existir
+        path = wav_path(audio_id)
+        if os.path.exists(path):
+            return send_from_directory(AUDIO_DIR, f"{audio_id}.wav", mimetype="audio/wav")
+        return jsonify({"error":"fetch_failed"}), 502
+
+    def gen():
+        for chunk in r.iter_content(chunk_size=16384):
+            if chunk:
+                yield chunk
+    return Response(gen(), content_type="audio/wav")
 
 @app.route("/debug/audios")
 def debug_audios():
@@ -102,7 +126,7 @@ def debug_audios():
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok"})
+    return jsonify({"status":"ok", "tts_base": TTS_BASE})
 
 # Mercado Pago monitor
 def buscar_pagamentos_once():

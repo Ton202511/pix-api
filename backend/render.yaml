@@ -1,14 +1,27 @@
 services:
   - type: web
-    name: pix-tts-proxy
+    name: pix-tts-wav
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      pip install -r requirements.txt
+
     startCommand: gunicorn app:app -b 0.0.0.0:10000
+
     envVars:
-      - key: TTS_BASE
-        value: https://pix-tts-wav.onrender.com
-      - key: PROXY_AUTH_TOKEN
-        value: troque_por_um_token_forte
+      - key: MP_ACCESS_TOKEN
+        value: SEU_TOKEN_MERCADO_PAGO
+
+      - key: ESP_BASE
+        value: http://192.168.0.58:80
+
+      - key: ESP_AUTH_TOKEN
+        value: SEU_TOKEN_DO_ESP
+
       - key: REQUEST_TIMEOUT
         value: 8
+
+      - key: CHECK_INTERVAL
+        value: 10
